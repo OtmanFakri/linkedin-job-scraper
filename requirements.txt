@@ -1,0 +1,21 @@
+# Direct dependencies for linkedin_jobs.py + telegram.py
+
+# Core browser automation agent
+browser-use==0.13.3
+
+# Pydantic (used for controller action param models)
+pydantic==2.12.5
+pydantic-settings==2.10.1
+pydantic_core==2.41.5
+
+# Google Auth (Vertex AI service account credentials)
+google-auth==2.55.2
+
+# Clipboard access
+pyperclip==1.11.0
+
+# HTTP requests (telegram.py)
+requests==2.33.0
+
+# .env loading (telegram.py)
+python-dotenv==1.2.2
