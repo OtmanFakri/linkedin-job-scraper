@@ -5,7 +5,7 @@ import os
 import csv
 import json
 from google.oauth2 import service_account
-
+import sys
 from telegram import send_job_post as tg_send
 
 # Load Vertex AI service account credentials from config.json
@@ -27,6 +27,8 @@ CSV_FILE = "linkedin_jobs.csv"
 class ReadShareToastParams(BaseModel):
     pass
 
+
+TASK_TIMEOUT_SECONDS = 55 * 60  # 55 min max, so cron (hourly) never overlaps
 
 @controller.action(
     description="After clicking 'Copy link to post', call this action to read the post URL directly from the confirmation toast that appears (it contains a 'View post' link with the real URL), then it automatically dismisses the toast.",
@@ -151,16 +153,25 @@ IMPORTANT CONSTRAINT: You must stay on the LinkedIn feed page (https://www.linke
         max_steps=150,
     )
 
-    await agent.run()
-
+    try:
+        await asyncio.wait_for(agent.run(), timeout=TASK_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        print("⚠️ Task exceeded time limit, forcing stop.")
+    finally:
+        try:
+            await browser.close()
+        except Exception as e:
+            print(f"Error closing browser: {e}")
 
 if __name__ == "__main__":
-    # Clear the CSV file before every fresh run
     with open(CSV_FILE, "w", newline="", encoding="utf-8") as _csv:
         import csv as _csv_mod
-
         _csv_mod.writer(_csv).writerow(
             ["Author", "Post URL", "Content", "Post Date", "Contact Info"]
         )
     print(f"✅ Cleared {CSV_FILE} — starting fresh run.")
+    
     asyncio.run(main())
+    
+    # Force-kill the process even if some background thread/connection is still holding the event loop
+    sys.exit(0)
