@@ -5,8 +5,7 @@ import os
 import csv
 import json
 from google.oauth2 import service_account
-import time
-import pyperclip
+
 from telegram import send_job_post as tg_send
 
 # Load Vertex AI service account credentials from config.json
@@ -25,23 +24,33 @@ controller = Controller()
 CSV_FILE = "linkedin_jobs.csv"
 
 
-class ReadClipboardParams(BaseModel):
-    pass  # no-param action; pydantic model needed so browser-use can validate the empty payload
+class ReadShareToastParams(BaseModel):
+    pass
 
 
 @controller.action(
-    description="Read the current clipboard content, used right after clicking 'Copy link to post' to retrieve the actual post URL.",
-    param_model=ReadClipboardParams,
+    description="After clicking 'Copy link to post', call this action to read the post URL directly from the confirmation toast that appears (it contains a 'View post' link with the real URL), then it automatically dismisses the toast.",
+    param_model=ReadShareToastParams,
 )
-def read_clipboard(params: ReadClipboardParams):
-    time.sleep(2.5)
+async def read_share_toast(params: ReadShareToastParams, browser):
+    page = await browser.get_current_page()
     try:
-        content = pyperclip.paste()
-        if not content or not content.startswith("http"):
-            return "Clipboard does not contain a valid URL yet."
-        return content
+        # Wait a moment for the toast to render
+        await page.wait_for_selector("a:has-text('View post')", timeout=4000)
+        url = await page.eval_on_selector("a:has-text('View post')", "el => el.href")
+
+        # Close the toast so it doesn't block subsequent clicks
+        close_btn = await page.query_selector(
+            "button[aria-label='Dismiss'], button[aria-label='Close']"
+        )
+        if close_btn:
+            await close_btn.click()
+
+        if url:
+            return url
+        return "Toast appeared but no URL found in 'View post' link."
     except Exception as e:
-        return f"Failed to read clipboard: {str(e)}"
+        return f"Toast did not appear or link not found: {str(e)}"
 
 
 # Define a controller action to save a job post to the CSV file
@@ -59,8 +68,13 @@ def save_job_post(
                 )
             writer.writerow([author, post_url, content, post_date, contact_info])
         # Notify via Telegram immediately after saving
-        tg_send(author=author, post_url=post_url, content=content,
-                post_date=post_date, contact_info=contact_info)
+        tg_send(
+            author=author,
+            post_url=post_url,
+            content=content,
+            post_date=post_date,
+            contact_info=contact_info,
+        )
         return f"Successfully saved job post by {author} to {CSV_FILE}"
     except Exception as e:
         return f"Failed to save job post: {str(e)}"
@@ -109,18 +123,18 @@ IMPORTANT CONSTRAINT: You must stay on the LinkedIn feed page (https://www.linke
 {resume_content}
 ---
 5. If a post matches (mentions hiring for a role like full-stack developer, Spring Boot, React, Cypress, QA automation, or similar), extract the following fields:
-   - Author (poster name)
-   - URL of the post — copy it using these exact steps:
+    - Author (poster name)
+    - URL of the post — copy it using these exact steps:
        a. Locate the three-dot menu icon ('...') at the top-right corner of the post.
        b. Click it to open the post options dropdown.
        c. Click "Copy link to post" from the dropdown menu.
-       d. After clicking 'Copy link to post', call the read_clipboard action to retrieve the actual URL, and use that exact returned value as post_url — never use the current page URL
-       e. If the dropdown does not appear or "Copy link to post" is not visible, try right-clicking the post timestamp (e.g., '1d ago') and copying that link instead.
+       d. A confirmation toast will appear at the bottom-left with a "View post" link — call the `read_share_toast` action immediately to extract that URL and dismiss the toast. Use the returned value as post_url.
+       e. If the toast does not appear within a few seconds, or the dropdown itself is not visible, try right-clicking the post timestamp (e.g., '1d ago') and copying that link instead.
    - Content (body text of the post)
    - Post Date (relative date like '1d ago', '3h ago')
    - Contact Info (any email, application link, or contact name; use 'N/A' if none found)
    - Call 'save_job_post' immediately with these fields.
-6. Keep scrolling and repeating steps 4-5 until you have found and saved at least 15 matching posts, or until you've scrolled through at least 20 posts without finding more matches.
+6. Keep scrolling and repeating steps 4-5 until you have found and saved at least 15 matching posts, or until you've scrolled through at least 30 consecutive posts without finding any new matches.
 7. Provide a summary of the posts you saved in your final answer.
 """,
         llm=ChatGoogle(
@@ -134,7 +148,7 @@ IMPORTANT CONSTRAINT: You must stay on the LinkedIn feed page (https://www.linke
         controller=controller,
         flash_mode=True,
         use_vision=False,
-        max_steps=60,
+        max_steps=150,
     )
 
     await agent.run()
