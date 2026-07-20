@@ -34,26 +34,66 @@ TASK_TIMEOUT_SECONDS = 55 * 60  # 55 min max, so cron (hourly) never overlaps
     description="After clicking 'Copy link to post', call this action to read the post URL directly from the confirmation toast that appears (it contains a 'View post' link with the real URL), then it automatically dismisses the toast.",
     param_model=ReadShareToastParams,
 )
-async def read_share_toast(params: ReadShareToastParams, browser):
-    page = await browser.get_current_page()
-    try:
-        # Wait a moment for the toast to render
-        await page.wait_for_selector("a:has-text('View post')", timeout=4000)
-        url = await page.eval_on_selector("a:has-text('View post')", "el => el.href")
+async def read_share_toast(params: ReadShareToastParams, browser_session):
+    page = await browser_session.get_current_page()
+    url = None
 
-        # Close the toast so it doesn't block subsequent clicks
-        close_btn = await page.query_selector(
-            "button[aria-label='Dismiss'], button[aria-label='Close']"
-        )
+    try:
+        # Wait for the SPECIFIC paragraph LinkedIn injects in the share toast.
+        # Using p:has-text() avoids matching pre-existing [role="alert"] elements
+        # (notification banners, live regions, etc.) that exist before the toast.
+        await page.wait_for_selector('p:has-text("Link copied")', timeout=5000)
+
+        # Strategy 1 – read from the OS clipboard (fastest, most reliable).
+        # Works when the browser context has the clipboard-read permission.
+        try:
+            url = await page.evaluate("""
+                async () => {
+                    try {
+                        const text = await navigator.clipboard.readText();
+                        return (text && text.includes('linkedin.com')) ? text : null;
+                    } catch (e) { return null; }
+                }
+            """)
+        except Exception:
+            pass
+
+        # Strategy 2 – extract from the paragraph that says "Link copied".
+        # This is scoped to that exact <p> so we never grab an unrelated anchor.
+        if not url:
+            url = await page.evaluate("""
+                () => {
+                    const paras = Array.from(document.querySelectorAll('p'));
+                    for (const p of paras) {
+                        if (p.textContent.includes('Link copied')) {
+                            const a = p.querySelector('a[href*="linkedin.com/posts/"]')
+                                   || p.querySelector('a[href*="/posts/"]');
+                            if (a) return a.href;
+                        }
+                    }
+                    return null;
+                }
+            """)
+
+    except Exception:
+        pass  # Toast didn't appear or timed out — proceed to close attempt
+
+    # Always dismiss the toast, with Escape as fallback
+    try:
+        close_btn = await page.query_selector('button[aria-label="Close"]')
         if close_btn:
             await close_btn.click()
+        else:
+            await page.keyboard.press('Escape')
+    except Exception:
+        try:
+            await page.keyboard.press('Escape')
+        except Exception:
+            pass
 
-        if url:
-            return url
-        return "Toast appeared but no URL found in 'View post' link."
-    except Exception as e:
-        return f"Toast did not appear or link not found: {str(e)}"
-
+    if url:
+        return url
+    return "Toast appeared but no URL found in 'View post' link."
 
 # Define a controller action to save a job post to the CSV file
 @controller.action(description="Save a single job post to the CSV file.")
@@ -102,7 +142,7 @@ async def main():
         headless=False,
         cross_origin_iframes=False,
         minimum_wait_page_load_time=3.0,
-        wait_between_actions=2.0,
+        wait_between_actions=3.0,
     )
 
     agent = Agent(
