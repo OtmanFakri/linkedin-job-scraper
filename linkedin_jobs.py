@@ -24,76 +24,106 @@ controller = Controller()
 CSV_FILE = "linkedin_jobs.csv"
 
 
-class ReadShareToastParams(BaseModel):
+class ExtractPostUrlParams(BaseModel):
     pass
 
 
 TASK_TIMEOUT_SECONDS = 55 * 60  # 55 min max, so cron (hourly) never overlaps
 
 @controller.action(
-    description="After clicking 'Copy link to post', call this action to read the post URL directly from the confirmation toast that appears (it contains a 'View post' link with the real URL), then it automatically dismisses the toast.",
-    param_model=ReadShareToastParams,
+    description=(
+        "Call this action WHILE the three-dot menu of a post is still open. "
+        "It reads the 'Embed this post' link from the dropdown to extract the "
+        "post's unique URN, builds the real post URL from it, then closes the menu. "
+        "Returns the post URL string."
+    ),
+    param_model=ExtractPostUrlParams,
 )
-async def read_share_toast(params: ReadShareToastParams, browser_session):
+async def extract_post_url(params: ExtractPostUrlParams, browser_session):
+    """Extract the post URL from the 'Embed this post' link in the open menu."""
     page = await browser_session.get_current_page()
     url = None
 
-    try:
-        # Wait for the SPECIFIC paragraph LinkedIn injects in the share toast.
-        # Using p:has-text() avoids matching pre-existing [role="alert"] elements
-        # (notification banners, live regions, etc.) that exist before the toast.
-        await page.wait_for_selector('p:has-text("Link copied")', timeout=5000)
+    # Diagnostic: understand what the page object really is
+    page_type = type(page).__name__
+    page_methods = [m for m in dir(page) if not m.startswith('_') and callable(getattr(page, m, None))]
+    print(f"[extract_post_url] page type={page_type}, methods={page_methods}")
 
-        # Strategy 1 – read from the OS clipboard (fastest, most reliable).
-        # Works when the browser context has the clipboard-read permission.
-        try:
-            url = await page.evaluate("""
-                async () => {
+    # Try to get the underlying Playwright page (browser-use wraps it)
+    real_page = getattr(page, '_page', None) or getattr(page, 'page', None)
+    if real_page:
+        print(f"[extract_post_url] Found underlying page: {type(real_page).__name__}")
+
+    # The JS we'll evaluate searches the ENTIRE document for embed links
+    js_code = """
+        () => {
+            const info = {
+                url: window.location.href,
+                title: document.title,
+                totalElements: document.getElementsByTagName('*').length,
+                menuRoleCount: document.querySelectorAll('[role="menu"]').length,
+                menuItemCount: document.querySelectorAll('[role="menuitem"]').length,
+                embedLinks: [],
+                postUrl: null
+            };
+
+            // Search ALL <a> tags on the page for embed-modal links
+            const allLinks = document.getElementsByTagName('a');
+            for (let i = 0; i < allLinks.length; i++) {
+                const href = allLinks[i].href || allLinks[i].getAttribute('href') || '';
+                if (href.includes('embed-modal') || href.includes('targetUrn')) {
+                    info.embedLinks.push(href);
+                    // Try to extract URN
                     try {
-                        const text = await navigator.clipboard.readText();
-                        return (text && text.includes('linkedin.com')) ? text : null;
-                    } catch (e) { return null; }
-                }
-            """)
-        except Exception:
-            pass
-
-        # Strategy 2 – extract from the paragraph that says "Link copied".
-        # This is scoped to that exact <p> so we never grab an unrelated anchor.
-        if not url:
-            url = await page.evaluate("""
-                () => {
-                    const paras = Array.from(document.querySelectorAll('p'));
-                    for (const p of paras) {
-                        if (p.textContent.includes('Link copied')) {
-                            const a = p.querySelector('a[href*="linkedin.com/posts/"]')
-                                   || p.querySelector('a[href*="/posts/"]');
-                            if (a) return a.href;
+                        const u = new URL(href, window.location.origin);
+                        const urn = u.searchParams.get('targetUrn');
+                        if (urn && !info.postUrl) {
+                            info.postUrl = 'https://www.linkedin.com/feed/update/' + urn + '/';
                         }
-                    }
-                    return null;
+                    } catch (e) {}
                 }
-            """)
+            }
 
-    except Exception:
-        pass  # Toast didn't appear or timed out — proceed to close attempt
+            return JSON.stringify(info);
+        }
+    """
 
-    # Always dismiss the toast, with Escape as fallback
+    for attempt in range(10):
+        await asyncio.sleep(0.5)
+
+        # Try evaluate on the page object we have
+        for eval_target, label in [(page, "page"), (real_page, "real_page")]:
+            if eval_target is None:
+                continue
+            try:
+                result_str = await eval_target.evaluate(js_code)
+                data = __import__('json').loads(result_str)
+                print(f"[extract_post_url] attempt {attempt+1} ({label}): "
+                      f"url={data['url'][:60]}, "
+                      f"elements={data['totalElements']}, "
+                      f"menus={data['menuRoleCount']}, "
+                      f"menuItems={data['menuItemCount']}, "
+                      f"embedLinks={data['embedLinks']}")
+
+                if data.get('postUrl'):
+                    url = data['postUrl']
+                    print(f"[extract_post_url] ✅ Got URL: {url}")
+                    break
+            except Exception as e:
+                print(f"[extract_post_url] attempt {attempt+1} ({label}) error: {e}")
+
+        if url:
+            break
+
+    # Close the dropdown menu so the feed is back to normal
     try:
-        close_btn = await page.query_selector('button[aria-label="Close"]')
-        if close_btn:
-            await close_btn.click()
-        else:
-            await page.keyboard.press('Escape')
+        await page.keyboard.press('Escape')
     except Exception:
-        try:
-            await page.keyboard.press('Escape')
-        except Exception:
-            pass
+        pass
 
     if url:
         return url
-    return "Toast appeared but no URL found in 'View post' link."
+    return "ERROR: Could not extract post URL from menu. Do NOT use https://www.linkedin.com/feed/ as a fallback."
 
 # Define a controller action to save a job post to the CSV file
 @controller.action(description="Save a single job post to the CSV file.")
@@ -166,12 +196,11 @@ IMPORTANT CONSTRAINT: You must stay on the LinkedIn feed page (https://www.linke
 ---
 5. If a post matches (mentions hiring for a role like full-stack developer, Spring Boot, React, Cypress, QA automation, or similar), extract the following fields:
     - Author (poster name)
-    - URL of the post — copy it using these exact steps:
+    - URL of the post — get it using these exact steps:
        a. Locate the three-dot menu icon ('...') at the top-right corner of the post.
        b. Click it to open the post options dropdown.
-       c. Click "Copy link to post" from the dropdown menu.
-       d. A confirmation toast will appear at the bottom-left with a "View post" link — call the `read_share_toast` action immediately to extract that URL and dismiss the toast. Use the returned value as post_url.
-       e. If the toast does not appear within a few seconds, or the dropdown itself is not visible, try right-clicking the post timestamp (e.g., '1d ago') and copying that link instead.
+       c. IMMEDIATELY call the `extract_post_url` action (do NOT click anything else first). This reads the 'Embed this post' link in the open menu, extracts the post URN, and builds the real URL. It also closes the menu automatically.
+       d. Use the returned URL as post_url. NEVER use https://www.linkedin.com/feed/ as a post URL.
    - Content (body text of the post)
    - Post Date (relative date like '1d ago', '3h ago')
    - Contact Info (any email, application link, or contact name; use 'N/A' if none found)
