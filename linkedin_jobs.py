@@ -173,6 +173,7 @@ async def main():
         cross_origin_iframes=False,
         minimum_wait_page_load_time=5.0,
         wait_between_actions=6.0,
+        disable_security=True,
     )
 
     agent = Agent(
@@ -205,7 +206,11 @@ IMPORTANT CONSTRAINT: You must stay on the LinkedIn feed page (https://www.linke
    - Post Date (relative date like '1d ago', '3h ago')
    - Contact Info (any email, application link, or contact name; use 'N/A' if none found)
    - Call 'save_job_post' immediately with these fields.
-6. Keep scrolling and repeating steps 4-5 until you have found and saved at least 15 matching posts, or until you've scrolled through at least 30 consecutive posts without finding any new matches.
+6. STOPPING RULES (follow strictly):
+   - STOP if you have saved at least 15 matching posts.
+   - STOP if you have scrolled past 15 consecutive posts without finding any new match.
+   - STOP if you notice the feed is no longer loading new content (same posts appearing).
+   - When stopping, IMMEDIATELY provide a final summary of all posts you saved. Do NOT keep scrolling.
 7. Provide a summary of the posts you saved in your final answer.
 """,
         llm=ChatGoogle(
@@ -219,7 +224,7 @@ IMPORTANT CONSTRAINT: You must stay on the LinkedIn feed page (https://www.linke
         controller=controller,
         flash_mode=True,
         use_vision=False,
-        max_steps=150,
+        max_steps=80,
     )
 
     try:
