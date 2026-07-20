@@ -171,8 +171,8 @@ async def main():
     browser = Browser.from_system_chrome(
         headless=False,
         cross_origin_iframes=False,
-        minimum_wait_page_load_time=3.0,
-        wait_between_actions=3.0,
+        minimum_wait_page_load_time=5.0,
+        wait_between_actions=6.0,
     )
 
     agent = Agent(
